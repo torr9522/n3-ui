@@ -244,6 +244,10 @@ func initAccessIPRecord() error {
 	return migrateAccessIPRecordIndexes()
 }
 
+func initSubscription() error {
+	return db.AutoMigrate(&model.Subscription{})
+}
+
 func migrateAccessIPRecordIndexes() error {
 	type indexInfo struct {
 		Name   string
@@ -334,6 +338,10 @@ func InitDB(dbPath string) error {
 		return err
 	}
 	err = initAccessIPRecord()
+	if err != nil {
+		return err
+	}
+	err = initSubscription()
 	if err != nil {
 		return err
 	}

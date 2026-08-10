@@ -80,3 +80,13 @@ type AccessIPRecord struct {
 	FirstSeen int64  `json:"firstSeen"`
 	LastSeen  int64  `json:"lastSeen" gorm:"index"`
 }
+
+type Subscription struct {
+	Id         int    `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`
+	Token      string `json:"token" form:"token" gorm:"uniqueIndex;size:64;not null"`
+	Remark     string `json:"remark" form:"remark"`
+	Enable     bool   `json:"enable" form:"enable"`
+	InboundIds string `json:"inboundIds" form:"inboundIds" gorm:"column:inbound_ids;type:text"`
+	CreatedAt  int64  `json:"createdAt" gorm:"autoCreateTime:milli"`
+	UpdatedAt  int64  `json:"updatedAt" gorm:"autoUpdateTime:milli"`
+}

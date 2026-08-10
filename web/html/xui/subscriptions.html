@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+{{template "head" .}}
+<style>
+    @media (min-width: 769px) {
+        .ant-layout-content {
+            margin: 24px 16px;
+        }
+    }
+
+    .subscription-url {
+        word-break: break-all;
+        font-family: monospace;
+        font-size: 12px;
+    }
+
+    .node-select-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+    }
+
+    .node-select-count {
+        color: rgba(0, 0, 0, 0.45);
+        font-size: 12px;
+    }
+
+    .node-select-actions .ant-btn {
+        padding: 0;
+        height: auto;
+        line-height: 1;
+    }
+
+    .node-select-actions .ant-btn + .ant-btn {
+        margin-left: 12px;
+    }
+
+    .node-select-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        max-height: 380px;
+        overflow-y: auto;
+        padding: 2px 4px 2px 2px;
+    }
+
+    .node-option {
+        cursor: pointer;
+        border: 1px solid #d9d9d9;
+        border-radius: 6px;
+        padding: 10px 12px;
+        background: #fff;
+        transition: border-color .2s, box-shadow .2s, background .2s;
+        min-height: 86px;
+        outline: none;
+    }
+
+    .node-option:hover {
+        border-color: #40a9ff;
+    }
+
+    .node-option.selected {
+        border-color: #1890ff;
+        background: #e6f7ff;
+        box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.12);
+    }
+
+    .node-title-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+    }
+
+    .node-check {
+        flex: 0 0 18px;
+        width: 18px;
+        height: 18px;
+        margin-top: 1px;
+        border: 1px solid #d9d9d9;
+        border-radius: 3px;
+        color: #fff;
+        background: #fff;
+        text-align: center;
+        line-height: 16px;
+        font-size: 12px;
+    }
+
+    .node-option.selected .node-check {
+        border-color: #1890ff;
+        background: #1890ff;
+    }
+
+    .node-title {
+        min-width: 0;
+        color: rgba(0, 0, 0, 0.85);
+        font-weight: 500;
+        line-height: 20px;
+        overflow-wrap: anywhere;
+    }
+
+    .node-meta {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 14px;
+        padding-left: 26px;
+    }
+
+    .node-meta .ant-tag {
+        margin-right: 0;
+    }
+
+    @media (max-width: 768px) {
+        .node-select-grid {
+            grid-template-columns: 1fr;
+            max-height: 340px;
+        }
+    }
+</style>
+<body>
+<a-layout id="app" v-cloak>
+    {{ template "commonSider" . }}
+    <a-layout id="content-layout">
+        <a-layout-content>
+            <a-spin :spinning="spinning" :delay="500" tip="loading">
+                <a-card hoverable>
+                    <div slot="title">
+                        <a-button type="primary" icon="plus" @click="openAdd">创建订阅</a-button>
+                        <a-button style="margin-left: 8px;" icon="reload" @click="loadAll">刷新</a-button>
+                    </div>
+                    <a-table :columns="columns" :row-key="sub => sub.id"
+                             :data-source="subscriptions"
+                             :loading="spinning"
+                             :pagination="false"
+                             :scroll="{ x: 1200 }">
+                        <template slot="enable" slot-scope="text, sub">
+                            <a-tag :color="sub.enable ? 'green' : 'red'">
+                                [[ sub.enable ? '启用' : '禁用' ]]
+                            </a-tag>
+                        </template>
+                        <template slot="nodeCount" slot-scope="text, sub">
+                            <a-tag color="blue">[[ sub.inboundIds.length ]]</a-tag>
+                        </template>
+                        <template slot="url" slot-scope="text, sub">
+                            <div class="subscription-url">[[ subscriptionUrl(sub) ]]</div>
+                        </template>
+                        <template slot="action" slot-scope="text, sub">
+                            <a-dropdown :trigger="['click']">
+                                <a @click="e => e.preventDefault()">操作</a>
+                                <a-menu slot="overlay" @click="a => handleAction(a, sub)">
+                                    <a-menu-item key="copy"><a-icon type="copy"></a-icon>复制URL</a-menu-item>
+                                    <a-menu-item key="copyClash"><a-icon type="copy"></a-icon>复制Clash URL</a-menu-item>
+                                    <a-menu-item key="qrcode"><a-icon type="qrcode"></a-icon>二维码</a-menu-item>
+                                    <a-menu-item key="edit"><a-icon type="edit"></a-icon>编辑</a-menu-item>
+                                    <a-menu-item key="refreshToken"><a-icon type="sync"></a-icon>刷新token</a-menu-item>
+                                    <a-menu-item key="delete">
+                                        <span style="color: #FF4D4F"><a-icon type="delete"></a-icon>删除</span>
+                                    </a-menu-item>
+                                </a-menu>
+                            </a-dropdown>
+                        </template>
+                    </a-table>
+                </a-card>
+            </a-spin>
+        </a-layout-content>
+    </a-layout>
+
+    <a-modal v-model="modal.visible" :title="modal.editing ? '编辑订阅' : '创建订阅'"
+             :width="760"
+             :confirm-loading="modal.submitting"
+             ok-text="保存" cancel-text="取消" @ok="submitModal">
+        <a-form layout="vertical">
+            <a-form-item label="备注">
+                <a-input v-model.trim="modal.form.remark" placeholder="例如 all nodes"></a-input>
+            </a-form-item>
+            <a-form-item label="状态">
+                <a-switch v-model="modal.form.enable"></a-switch>
+            </a-form-item>
+            <a-form-item>
+                <div class="node-select-header">
+                    <div>
+                        节点
+                        <span class="node-select-count">已选择 [[ selectedNodeCount ]] 个</span>
+                    </div>
+                    <div class="node-select-actions">
+                        <a-button type="link" size="small" @click="selectAllInbounds">全选</a-button>
+                        <a-button type="link" size="small" @click="clearInbounds">清空</a-button>
+                    </div>
+                </div>
+                <div class="node-select-grid">
+                    <div v-for="inbound in subscribableInbounds"
+                         :key="inbound.id"
+                         class="node-option"
+                         :class="{ selected: isInboundSelected(inbound.id) }"
+                         role="checkbox"
+                         :aria-checked="isInboundSelected(inbound.id) ? 'true' : 'false'"
+                         tabindex="0"
+                         @click="toggleInbound(inbound)"
+                         @keydown.enter.prevent="toggleInbound(inbound)"
+                         @keydown.space.prevent="toggleInbound(inbound)">
+                        <div class="node-title-row">
+                            <div class="node-check">
+                                <a-icon v-if="isInboundSelected(inbound.id)" type="check"></a-icon>
+                            </div>
+                            <div class="node-title">[[ inboundTitle(inbound) ]]</div>
+                        </div>
+                        <div class="node-meta">
+                            <a-tag color="blue">[[ protocolLabel(inbound.protocol) ]]</a-tag>
+                            <a-tag v-if="securityLabel(inbound)" :color="securityColor(inbound)">
+                                [[ securityLabel(inbound) ]]
+                            </a-tag>
+                            <a-tag color="green">Port [[ inbound.port ]]</a-tag>
+                        </div>
+                    </div>
+                </div>
+            </a-form-item>
+        </a-form>
+    </a-modal>
+
+    <a-modal v-model="qr.visible" title="订阅二维码" :footer="null" width="360px">
+        <div style="text-align: center;">
+            <canvas id="subscription-qrcode"></canvas>
+            <div class="subscription-url" style="margin-top: 12px;">[[ qr.url ]]</div>
+        </div>
+    </a-modal>
+</a-layout>
+{{template "js" .}}
+<script>
+    const subscribableProtocols = [Protocols.VMESS, Protocols.VLESS, Protocols.TROJAN, Protocols.SHADOWSOCKS];
+
+    const columns = [{
+        title: "操作",
+        align: "center",
+        width: 80,
+        scopedSlots: { customRender: "action" },
+    }, {
+        title: "状态",
+        align: "center",
+        width: 80,
+        scopedSlots: { customRender: "enable" },
+    }, {
+        title: "备注",
+        dataIndex: "remark",
+        width: 180,
+    }, {
+        title: "节点数",
+        align: "center",
+        width: 80,
+        scopedSlots: { customRender: "nodeCount" },
+    }, {
+        title: "订阅URL",
+        width: 520,
+        scopedSlots: { customRender: "url" },
+    }, {
+        title: "更新时间",
+        width: 180,
+        customRender: value => value ? DateUtil.formatMillis(value) : "",
+        dataIndex: "updatedAt",
+    }];
+
+    const app = new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#app',
+        data: {
+            siderDrawer,
+            spinning: false,
+            columns,
+            subscriptions: [],
+            dbInbounds: [],
+            modal: {
+                visible: false,
+                editing: false,
+                submitting: false,
+                form: {
+                    id: 0,
+                    remark: "",
+                    enable: true,
+                    inboundIds: [],
+                },
+            },
+            qr: {
+                visible: false,
+                url: "",
+            },
+        },
+        computed: {
+            subscribableInbounds() {
+                return this.dbInbounds.filter(inbound => subscribableProtocols.includes(inbound.protocol));
+            },
+            selectedNodeCount() {
+                return this.modal.form.inboundIds.length;
+            },
+        },
+        async mounted() {
+            await this.loadAll();
+        },
+        methods: {
+            async loadAll() {
+                this.spinning = true;
+                await Promise.all([this.loadSubscriptions(), this.loadInbounds()]);
+                this.spinning = false;
+            },
+            async loadSubscriptions() {
+                const msg = await HttpUtil.post('/xui/subscription/list');
+                if (msg.success) {
+                    this.subscriptions = (msg.obj || []).map(sub => {
+                        sub.inboundIds = Array.isArray(sub.inboundIds) ? sub.inboundIds : [];
+                        return sub;
+                    });
+                }
+            },
+            async loadInbounds() {
+                const msg = await HttpUtil.post('/xui/inbound/list');
+                if (msg.success) {
+                    this.dbInbounds = (msg.obj || []).filter(inbound => inbound.enable);
+                }
+            },
+            subscriptionUrl(sub, format="") {
+                const cleanBase = basePath.endsWith("/") ? basePath : basePath + "/";
+                let url = location.origin + cleanBase + "sub/" + encodeURIComponent(sub.token);
+                if (format) {
+                    url += "?format=" + encodeURIComponent(format);
+                }
+                return url;
+            },
+            inboundTitle(inbound) {
+                const remark = (inbound.remark || "").trim();
+                if (remark) {
+                    return remark;
+                }
+                return `${this.protocolLabel(inbound.protocol)} ${inbound.port}`;
+            },
+            protocolLabel(protocol) {
+                switch (protocol) {
+                    case Protocols.VMESS:
+                        return "VMess";
+                    case Protocols.VLESS:
+                        return "VLESS";
+                    case Protocols.TROJAN:
+                        return "Trojan";
+                    case Protocols.SHADOWSOCKS:
+                        return "Shadowsocks";
+                    default:
+                        return protocol || "Inbound";
+                }
+            },
+            streamSecurity(inbound) {
+                let stream = inbound.streamSettings || {};
+                if (typeof stream === "string") {
+                    try {
+                        stream = JSON.parse(stream || "{}");
+                    } catch (e) {
+                        stream = {};
+                    }
+                }
+                return (stream.security || "none").toLowerCase();
+            },
+            securityLabel(inbound) {
+                if (inbound.protocol === Protocols.SHADOWSOCKS) {
+                    return "";
+                }
+                const security = this.streamSecurity(inbound);
+                if (security === "reality") {
+                    return "Reality";
+                }
+                if (security === "tls" || security === "xtls") {
+                    return "TLS";
+                }
+                return "None";
+            },
+            securityColor(inbound) {
+                const security = this.streamSecurity(inbound);
+                if (security === "reality") {
+                    return "purple";
+                }
+                if (security === "tls" || security === "xtls") {
+                    return "green";
+                }
+                return "default";
+            },
+            isInboundSelected(id) {
+                return this.modal.form.inboundIds.includes(id);
+            },
+            toggleInbound(inbound) {
+                const id = inbound.id;
+                const ids = this.modal.form.inboundIds.slice();
+                const index = ids.indexOf(id);
+                if (index >= 0) {
+                    ids.splice(index, 1);
+                } else {
+                    ids.push(id);
+                }
+                this.modal.form.inboundIds = ids;
+            },
+            selectAllInbounds() {
+                this.modal.form.inboundIds = this.subscribableInbounds.map(inbound => inbound.id);
+            },
+            clearInbounds() {
+                this.modal.form.inboundIds = [];
+            },
+            openAdd() {
+                this.modal.editing = false;
+                this.modal.form = {
+                    id: 0,
+                    remark: "",
+                    enable: true,
+                    inboundIds: this.subscribableInbounds.map(inbound => inbound.id),
+                };
+                this.modal.visible = true;
+            },
+            openEdit(sub) {
+                this.modal.editing = true;
+                this.modal.form = {
+                    id: sub.id,
+                    remark: sub.remark,
+                    enable: sub.enable,
+                    inboundIds: ObjectUtil.clone(sub.inboundIds),
+                };
+                this.modal.visible = true;
+            },
+            async submitModal() {
+                this.modal.submitting = true;
+                const data = {
+                    remark: this.modal.form.remark,
+                    enable: this.modal.form.enable,
+                    inboundIds: this.modal.form.inboundIds,
+                };
+                const url = this.modal.editing
+                    ? `/xui/subscription/update/${this.modal.form.id}`
+                    : '/xui/subscription/add';
+                const msg = await HttpUtil.post(url, data);
+                this.modal.submitting = false;
+                if (msg.success) {
+                    this.modal.visible = false;
+                    await this.loadSubscriptions();
+                }
+            },
+            handleAction(action, sub) {
+                switch (action.key) {
+                    case "copy":
+                        this.copy(this.subscriptionUrl(sub));
+                        break;
+                    case "copyClash":
+                        this.copy(this.subscriptionUrl(sub, "clash"));
+                        break;
+                    case "qrcode":
+                        this.showQRCode(sub);
+                        break;
+                    case "edit":
+                        this.openEdit(sub);
+                        break;
+                    case "refreshToken":
+                        this.refreshToken(sub);
+                        break;
+                    case "delete":
+                        this.deleteSubscription(sub);
+                        break;
+                }
+            },
+            async copy(text) {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const input = document.createElement("textarea");
+                    input.value = text;
+                    input.style.position = "fixed";
+                    input.style.left = "-9999px";
+                    document.body.appendChild(input);
+                    input.focus();
+                    input.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(input);
+                }
+                this.$message.success("已复制");
+            },
+            showQRCode(sub) {
+                this.qr.url = this.subscriptionUrl(sub);
+                this.qr.visible = true;
+                this.$nextTick(() => {
+                    new QRious({
+                        element: document.getElementById("subscription-qrcode"),
+                        value: this.qr.url,
+                        size: 260,
+                    });
+                });
+            },
+            refreshToken(sub) {
+                this.$confirm({
+                    title: "刷新 token 后旧订阅 URL 将立即失效",
+                    okText: "刷新",
+                    cancelText: "取消",
+                    onOk: async () => {
+                        const msg = await HttpUtil.post(`/xui/subscription/refresh-token/${sub.id}`);
+                        if (msg.success) {
+                            await this.loadSubscriptions();
+                        }
+                    },
+                });
+            },
+            deleteSubscription(sub) {
+                this.$confirm({
+                    title: "确定删除该订阅？",
+                    okText: "删除",
+                    okType: "danger",
+                    cancelText: "取消",
+                    onOk: async () => {
+                        const msg = await HttpUtil.post(`/xui/subscription/del/${sub.id}`);
+                        if (msg.success) {
+                            await this.loadSubscriptions();
+                        }
+                    },
+                });
+            },
+        },
+    });
+</script>
+</body>
+</html>
