@@ -508,6 +508,65 @@ list_certificates() {
     fi
 }
 
+path_references_cert_dir() {
+    local path="$1"
+    local dir="$2"
+    [[ -n "${path}" && "${path}" == "${dir}/"* ]]
+}
+
+panel_cert_reference_status() {
+    local dir="$1"
+    require_sqlite || return 2
+    local cert_file key_file
+    cert_file=$(get_panel_setting "webCertFile")
+    key_file=$(get_panel_setting "webKeyFile")
+    if path_references_cert_dir "${cert_file}" "${dir}" || path_references_cert_dir "${key_file}" "${dir}"; then
+        LOGE "引用状态: 面板HTTPS正在使用该证书"
+        LOGI "面板证书: ${cert_file:-未设置}"
+        LOGI "面板私钥: ${key_file:-未设置}"
+        return 0
+    fi
+    LOGI "引用状态: 面板HTTPS未引用"
+    return 1
+}
+
+inbound_cert_references() {
+    local dir="$1"
+    require_sqlite || return 2
+    if ! command -v jq &>/dev/null; then
+        LOGE "未找到 jq，无法解析入站 stream_settings"
+        return 2
+    fi
+
+    local rows refs jq_filter
+    rows=$(sqlite3 -separator $'\t' "${XUI_DB_PATH}" "SELECT id, remark, port, protocol, stream_settings FROM inbounds;")
+    jq_filter='[.tlsSettings.certificates[]?, .xtlsSettings.certificates[]?] | .[] | select(((.certificateFile // "") | startswith($dir)) or ((.keyFile // "") | startswith($dir))) | [(.certificateFile // ""), (.keyFile // "")] | @tsv'
+    refs=""
+    while IFS=$'\t' read -r inbound_id remark port protocol stream_settings; do
+        [[ -n "${inbound_id}" ]] || continue
+        local cert_refs
+        cert_refs=$(echo "${stream_settings}" | jq -r --arg dir "${dir}/" "${jq_filter}" 2>/dev/null)
+        if [[ $? -ne 0 ]]; then
+            LOGE "解析入站 stream_settings 失败: id=${inbound_id}"
+            return 2
+        fi
+        if [[ -n "${cert_refs}" ]]; then
+            while IFS=$'\t' read -r cert_file key_file; do
+                refs="${refs}
+id=${inbound_id} remark=${remark} port=${port} protocol=${protocol} cert=${cert_file} key=${key_file}"
+            done <<< "${cert_refs}"
+        fi
+    done <<< "${rows}"
+
+    if [[ -n "${refs}" ]]; then
+        LOGE "引用状态: 入站TLS正在使用该证书"
+        echo "${refs}" | sed '/^$/d'
+        return 0
+    fi
+    LOGI "引用状态: 入站TLS未引用"
+    return 1
+}
+
 renew_certificate() {
     local domain=""
     read -p "请输入要续期的域名:" domain
@@ -551,12 +610,51 @@ delete_certificate() {
         LOGE "证书不存在: ${dir}"
         return 1
     fi
-    confirm "确认删除 ${dir} 吗" "n"
+
+    echo "----------------------------------------"
+    LOGI "待删除域名: ${domain}"
+    LOGI "托管目录: ${dir}"
+    local blocked=0
+    panel_cert_reference_status "${dir}"
+    case $? in
+    0)
+        blocked=1
+        ;;
+    2)
+        return 1
+        ;;
+    esac
+    inbound_cert_references "${dir}"
+    case $? in
+    0)
+        blocked=1
+        ;;
+    2)
+        return 1
+        ;;
+    esac
+    if [[ ${blocked} -ne 0 ]]; then
+        LOGE "该证书正在被使用，禁止删除"
+        LOGI "如需删除，请先关闭面板HTTPS、切换其它证书，或删除/修改引用该证书的入站"
+        return 1
+    fi
+
+    confirm "确认删除 ${dir} 并同步清理 acme.sh 记录吗" "n"
     if [[ $? -ne 0 ]]; then
         return 0
     fi
+    remove_acme_cert_record "${domain}"
+    if [[ $? -ne 0 ]]; then
+        LOGE "证书删除失败: acme.sh 记录清理失败，n3-ui托管目录未删除"
+        return 1
+    fi
     rm -rf "${dir}"
-    LOGI "证书已删除: ${domain}"
+    if [[ -d "${dir}" ]]; then
+        LOGE "n3-ui托管目录删除失败: ${dir}"
+        return 1
+    fi
+    LOGI "n3-ui托管目录删除成功: ${dir}"
+    LOGI "证书删除完成: ${domain}"
 }
 
 sql_escape() {
@@ -578,6 +676,102 @@ require_sqlite() {
 get_panel_setting() {
     local key="$1"
     sqlite3 "${XUI_DB_PATH}" "SELECT value FROM settings WHERE key='${key}' ORDER BY id DESC LIMIT 1;"
+}
+
+acme_sh_path() {
+    if [[ -f "/root/.acme.sh/acme.sh" ]]; then
+        echo "/root/.acme.sh/acme.sh"
+        return 0
+    fi
+    if [[ -f "${HOME}/.acme.sh/acme.sh" ]]; then
+        echo "${HOME}/.acme.sh/acme.sh"
+        return 0
+    fi
+    return 1
+}
+
+acme_record_dir_exists() {
+    local domain="$1"
+    [[ -d "/root/.acme.sh/${domain}" || -d "/root/.acme.sh/${domain}_ecc" || -d "${HOME}/.acme.sh/${domain}" || -d "${HOME}/.acme.sh/${domain}_ecc" ]]
+}
+
+acme_exact_record_exists() {
+    local domain="$1"
+    local acme
+    acme=$(acme_sh_path) || return 1
+    "${acme}" --list 2>/dev/null | awk -v domain="${domain}" 'NR > 1 && $1 == domain { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+acme_record_exists() {
+    local domain="$1"
+    acme_record_dir_exists "${domain}" || acme_exact_record_exists "${domain}"
+}
+
+acme_active_record_exists() {
+    local domain="$1"
+    acme_exact_record_exists "${domain}"
+}
+
+remove_acme_cert_record() {
+    local domain="$1"
+    local acme
+    acme=$(acme_sh_path) || {
+        if acme_record_dir_exists "${domain}"; then
+            LOGE "acme记录清理失败: 未找到 acme.sh"
+            return 1
+        fi
+        LOGI "acme记录清理: 未找到 acme.sh，且未发现记录"
+        return 0
+    }
+
+    if ! acme_active_record_exists "${domain}"; then
+        if acme_record_dir_exists "${domain}"; then
+            LOGI "acme记录清理: 未发现有效列表记录，仅存在 acme.sh 残留目录"
+        else
+            LOGI "acme记录清理: 未发现 ${domain} 的 acme.sh 记录"
+        fi
+        return 0
+    fi
+
+    local removed=1
+    "${acme}" --remove -d "${domain}"
+    if [[ $? -eq 0 ]]; then
+        removed=0
+    fi
+    if [[ -d "/root/.acme.sh/${domain}_ecc" || -d "${HOME}/.acme.sh/${domain}_ecc" ]]; then
+        "${acme}" --remove -d "${domain}" --ecc
+        if [[ $? -eq 0 ]]; then
+            removed=0
+        fi
+    fi
+
+    if [[ ${removed} -eq 0 ]]; then
+        LOGI "acme记录清理成功: ${domain}"
+        return 0
+    fi
+    LOGE "acme记录清理失败: ${domain}"
+    return 1
+}
+
+prepare_acme_domain_for_issue() {
+    local domain="$1"
+    local cert_path
+    ACME_REISSUE_FORCE=0
+    cert_path=$(cert_domain_dir "${domain}")
+    if [[ -d "${cert_path}" && ( -f "${cert_path}/fullchain.pem" || -f "${cert_path}/privkey.pem" ) ]]; then
+        LOGE "域名合法性校验失败,n3-ui 已存在对应域名证书: ${cert_path}"
+        return 1
+    fi
+    if acme_active_record_exists "${domain}"; then
+        LOGI "发现同域名旧 acme.sh 记录，先执行 acme.sh --remove 清理后重新申请"
+        remove_acme_cert_record "${domain}" || return 1
+        ACME_REISSUE_FORCE=1
+    elif acme_record_dir_exists "${domain}"; then
+        LOGI "发现同域名 acme.sh 残留目录，重新申请将使用 --force 覆盖旧 key 文件"
+        ACME_REISSUE_FORCE=1
+    fi
+    LOGI "域名合法性校验通过..."
+    return 0
 }
 
 cert_key_match() {
@@ -883,15 +1077,9 @@ ssl_cert_issue_standalone() {
     local domain=""
     read -p "请输入你的域名:" domain
     LOGD "你输入的域名为:${domain},正在进行域名合法性校验..."
-    #here we need to judge whether there exists cert already
-    local currentCert=$(~/.acme.sh/acme.sh --list | grep "${domain}" | wc -l)
-    if [ ${currentCert} -ne 0 ]; then
-        local certInfo=$(~/.acme.sh/acme.sh --list)
-        LOGE "域名合法性校验失败,当前环境已有对应域名证书,不可重复申请,当前证书详情:"
-        LOGI "$certInfo"
+    prepare_acme_domain_for_issue "${domain}"
+    if [[ $? -ne 0 ]]; then
         exit 1
-    else
-        LOGI "域名合法性校验通过..."
     fi
     #creat a directory for install cert
     certPath=$(cert_domain_dir "${domain}")
@@ -908,10 +1096,14 @@ ssl_cert_issue_standalone() {
     #NOTE:This should be handled by use
     #open the port and kill the occupied progress
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-    ~/.acme.sh/acme.sh --issue -d ${domain} --standalone --httpport ${WebPort}
+    local issue_args=(--issue -d "${domain}" --standalone --httpport "${WebPort}")
+    if [[ "${ACME_REISSUE_FORCE}" == "1" ]]; then
+        issue_args+=(--force)
+    fi
+    ~/.acme.sh/acme.sh "${issue_args[@]}"
     if [ $? -ne 0 ]; then
         LOGE "证书申请失败,原因请参见报错信息"
-        rm -rf ~/.acme.sh/${domain}
+        remove_acme_cert_record "${domain}"
         exit 1
     else
         LOGI "证书申请成功,开始安装证书..."
@@ -923,7 +1115,7 @@ ssl_cert_issue_standalone() {
 
     if [ $? -ne 0 ]; then
         LOGE "证书安装失败,脚本退出"
-        rm -rf ~/.acme.sh/${domain}
+        remove_acme_cert_record "${domain}"
         exit 1
     else
         LOGI "证书安装成功,开启自动更新..."
@@ -965,15 +1157,9 @@ ssl_cert_issue_by_cloudflare() {
         LOGD "请设置域名:"
         read -p "Input your domain here:" CF_Domain
         LOGD "你的域名设置为:${CF_Domain},正在进行域名合法性校验..."
-        #here we need to judge whether there exists cert already
-        local currentCert=$(~/.acme.sh/acme.sh --list | grep "${CF_Domain}" | wc -l)
-        if [ ${currentCert} -ne 0 ]; then
-            local certInfo=$(~/.acme.sh/acme.sh --list)
-            LOGE "域名合法性校验失败,当前环境已有对应域名证书,不可重复申请,当前证书详情:"
-            LOGI "$certInfo"
+        prepare_acme_domain_for_issue "${CF_Domain}"
+        if [[ $? -ne 0 ]]; then
             exit 1
-        else
-            LOGI "域名合法性校验通过..."
         fi
         certPath=$(cert_domain_dir "${CF_Domain}")
         if [ ! -d "$certPath" ]; then
@@ -992,10 +1178,14 @@ ssl_cert_issue_by_cloudflare() {
         fi
         export CF_Key="${CF_GlobalKey}"
         export CF_Email=${CF_AccountEmail}
-        ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${CF_Domain} -d *.${CF_Domain} --log
+        local issue_args=(--issue --dns dns_cf -d "${CF_Domain}" -d "*.${CF_Domain}" --log)
+        if [[ "${ACME_REISSUE_FORCE}" == "1" ]]; then
+            issue_args+=(--force)
+        fi
+        ~/.acme.sh/acme.sh "${issue_args[@]}"
         if [ $? -ne 0 ]; then
             LOGE "证书签发失败,脚本退出"
-            rm -rf ~/.acme.sh/${CF_Domain}
+            remove_acme_cert_record "${CF_Domain}"
             exit 1
         else
             LOGI "证书签发成功,安装中..."
@@ -1005,7 +1195,7 @@ ssl_cert_issue_by_cloudflare() {
             --fullchain-file "${certPath}/fullchain.pem"
         if [ $? -ne 0 ]; then
             LOGE "证书安装失败,脚本退出"
-            rm -rf ~/.acme.sh/${CF_Domain}
+            remove_acme_cert_record "${CF_Domain}"
             exit 1
         else
             LOGI "证书安装成功,开启自动更新..."

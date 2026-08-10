@@ -1,14 +1,19 @@
 package service
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+	"x-ui/database"
+	"x-ui/database/model"
 	"x-ui/util/common"
 	"x-ui/web/entity"
 )
@@ -122,6 +127,73 @@ func (s *CertificateService) Validate(certFile string, keyFile string) (*entity.
 	return s.validatePair("", "", "custom", certFile, keyFile, false, strings.HasPrefix(certFile, CertificateDir))
 }
 
+func (s *CertificateService) DeleteManaged(domain string) (*entity.CertificateDeleteResult, error) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil, common.NewError("domain is empty")
+	}
+	domainDir, err := s.safeManagedDomainDir(domain)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(domainDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, common.NewErrorf("certificate not found: %s", domain)
+		}
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, common.NewError("certificate directory is a symlink")
+	}
+	if !info.IsDir() {
+		return nil, common.NewError("certificate path is not a directory")
+	}
+
+	result := &entity.CertificateDeleteResult{
+		Domain: domain,
+		Dir:    domainDir,
+	}
+	refs, err := s.CheckReferences(domain)
+	if err != nil {
+		return result, err
+	}
+	result.References = *refs
+	if refs.PanelHTTPS || len(refs.Inbounds) > 0 {
+		return result, common.NewError(formatCertificateReferenceMessage(refs))
+	}
+
+	acmeOK, acmeMsg := removeAcmeCertificate(domain)
+	result.RemovedAcme = acmeOK
+	result.AcmeMessage = acmeMsg
+	if !acmeOK {
+		return result, common.NewError(acmeMsg)
+	}
+
+	if err := os.RemoveAll(domainDir); err != nil {
+		result.ManagedMessage = err.Error()
+		return result, err
+	}
+	result.RemovedManaged = true
+	result.ManagedMessage = "managed certificate directory removed"
+	return result, nil
+}
+
+func (s *CertificateService) CheckReferences(domain string) (*entity.CertificateReferenceStatus, error) {
+	domainDir, err := s.safeManagedDomainDir(domain)
+	if err != nil {
+		return nil, err
+	}
+	refs := &entity.CertificateReferenceStatus{}
+	if err := s.checkPanelHTTPSReference(domainDir, refs); err != nil {
+		return nil, err
+	}
+	if err := s.checkInboundCertificateReferences(domainDir, refs); err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
 func (s *CertificateService) scanManaged() ([]entity.CertificateInfo, error) {
 	entries, err := os.ReadDir(CertificateDir)
 	if err != nil {
@@ -185,6 +257,7 @@ func (s *CertificateService) scanAcme() ([]entity.CertificateInfo, error) {
 	}
 
 	certs := make([]entity.CertificateInfo, 0)
+	activeDomains := listedAcmeDomains(filepath.Join(root, "acme.sh"))
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || !d.IsDir() || path == root {
 			return nil
@@ -192,6 +265,9 @@ func (s *CertificateService) scanAcme() ([]entity.CertificateInfo, error) {
 		name := filepath.Base(path)
 		if strings.HasSuffix(name, "_ecc") {
 			name = strings.TrimSuffix(name, "_ecc")
+		}
+		if activeDomains != nil && !activeDomains[name] {
+			return nil
 		}
 		candidates := [][2]string{
 			{filepath.Join(path, "fullchain.cer"), filepath.Join(path, name+".key")},
@@ -317,6 +393,290 @@ func (s *CertificateService) isAllowedPath(path string) bool {
 		}
 	}
 	return false
+}
+
+func (s *CertificateService) safeManagedDomainDir(domain string) (string, error) {
+	cleanDomain := strings.TrimSpace(strings.TrimPrefix(domain, "*."))
+	if cleanDomain == "" {
+		return "", common.NewError("domain is empty")
+	}
+	if filepath.IsAbs(cleanDomain) || strings.Contains(cleanDomain, "/") || strings.Contains(cleanDomain, `\`) || cleanDomain == "." || cleanDomain == ".." || strings.Contains(cleanDomain, "..") {
+		return "", common.NewError("invalid certificate domain")
+	}
+	safeDomain := sanitizeCertDomain(domain)
+	if safeDomain == "unknown" || safeDomain != cleanDomain {
+		return "", common.NewError("invalid certificate domain")
+	}
+
+	root, err := filepath.Abs(CertificateDir)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, safeDomain)
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", common.NewError("certificate path is not allowed")
+	}
+
+	if realRoot, err := filepath.EvalSymlinks(root); err == nil {
+		if realDir, err := filepath.EvalSymlinks(dir); err == nil {
+			rel, err := filepath.Rel(realRoot, realDir)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+				return "", common.NewError("certificate path is not allowed")
+			}
+		}
+	}
+	return dir, nil
+}
+
+func (s *CertificateService) checkPanelHTTPSReference(domainDir string, refs *entity.CertificateReferenceStatus) error {
+	db := database.GetDB()
+	settings := make([]model.Setting, 0)
+	if err := db.Model(model.Setting{}).Where("key IN ?", []string{"webCertFile", "webKeyFile"}).Find(&settings).Error; err != nil {
+		return err
+	}
+	for _, setting := range settings {
+		switch setting.Key {
+		case "webCertFile":
+			if refs.PanelCert == "" {
+				refs.PanelCert = setting.Value
+			}
+			if pathReferencesDir(setting.Value, domainDir) {
+				refs.PanelHTTPS = true
+			}
+		case "webKeyFile":
+			if refs.PanelKey == "" {
+				refs.PanelKey = setting.Value
+			}
+			if pathReferencesDir(setting.Value, domainDir) {
+				refs.PanelHTTPS = true
+			}
+		}
+	}
+	return nil
+}
+
+func (s *CertificateService) checkInboundCertificateReferences(domainDir string, refs *entity.CertificateReferenceStatus) error {
+	db := database.GetDB()
+	inbounds := make([]model.Inbound, 0)
+	if err := db.Model(model.Inbound{}).Find(&inbounds).Error; err != nil {
+		return err
+	}
+	for _, inbound := range inbounds {
+		streamSettings := strings.TrimSpace(inbound.StreamSettings)
+		if streamSettings == "" {
+			continue
+		}
+		stream := certificateReferenceStreamSettings{}
+		if err := json.Unmarshal([]byte(streamSettings), &stream); err != nil {
+			return common.NewErrorf("parse inbound %d stream settings failed: %v", inbound.Id, err)
+		}
+		certs := make([]certificateReferenceFilePair, 0, len(stream.TLSSettings.Certificates)+len(stream.XTLSSettings.Certificates))
+		certs = append(certs, stream.TLSSettings.Certificates...)
+		certs = append(certs, stream.XTLSSettings.Certificates...)
+		for _, cert := range certs {
+			if pathReferencesDir(cert.CertificateFile, domainDir) || pathReferencesDir(cert.KeyFile, domainDir) {
+				refs.Inbounds = append(refs.Inbounds, entity.InboundCertificateReference{
+					Id:       inbound.Id,
+					Remark:   inbound.Remark,
+					Port:     inbound.Port,
+					Protocol: string(inbound.Protocol),
+					CertFile: cert.CertificateFile,
+					KeyFile:  cert.KeyFile,
+				})
+				break
+			}
+		}
+	}
+	return nil
+}
+
+type certificateReferenceStreamSettings struct {
+	TLSSettings  certificateReferenceTLSSettings `json:"tlsSettings"`
+	XTLSSettings certificateReferenceTLSSettings `json:"xtlsSettings"`
+}
+
+type certificateReferenceTLSSettings struct {
+	Certificates []certificateReferenceFilePair `json:"certificates"`
+}
+
+type certificateReferenceFilePair struct {
+	CertificateFile string `json:"certificateFile"`
+	KeyFile         string `json:"keyFile"`
+}
+
+func pathReferencesDir(path string, dir string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	if realPath, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = realPath
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	if realDir, err := filepath.EvalSymlinks(absDir); err == nil {
+		absDir = realDir
+	}
+	rel, err := filepath.Rel(absDir, absPath)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
+func formatCertificateReferenceMessage(refs *entity.CertificateReferenceStatus) string {
+	messages := make([]string, 0)
+	if refs.PanelHTTPS {
+		messages = append(messages, "该证书正在用于面板HTTPS，请先关闭HTTPS或切换其它证书")
+	}
+	for _, inbound := range refs.Inbounds {
+		messages = append(messages, fmt.Sprintf("该证书正在被入站引用: id=%d remark=%s port=%d protocol=%s", inbound.Id, inbound.Remark, inbound.Port, inbound.Protocol))
+	}
+	if len(messages) == 0 {
+		return ""
+	}
+	return strings.Join(messages, "; ")
+}
+
+func removeAcmeCertificate(domain string) (bool, string) {
+	script := findAcmeScript()
+	recordExists := acmeRecordExists(domain)
+	if script == "" {
+		if recordExists {
+			return false, "acme.sh not found, acme record was not removed"
+		}
+		return true, "acme.sh not found, no acme record found"
+	}
+	if !acmeListContains(script, domain) {
+		if recordExists {
+			return true, "no active acme.sh record found; stale acme directory remains"
+		}
+		return true, "no acme.sh record found"
+	}
+
+	outputs := make([]string, 0)
+	removeOK := false
+	attempts := [][]string{{"--remove", "-d", domain}}
+	if acmeEccRecordExists(domain) {
+		attempts = append(attempts, []string{"--remove", "-d", domain, "--ecc"})
+	}
+	for _, args := range attempts {
+		cmd := acmeCommand(script, args...)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			outputs = append(outputs, strings.TrimSpace(out.String()))
+			continue
+		}
+		removeOK = true
+		if text := strings.TrimSpace(out.String()); text != "" {
+			outputs = append(outputs, text)
+		}
+	}
+	message := strings.Join(compactStrings(outputs), "; ")
+	if message == "" {
+		message = "acme.sh remove completed"
+	}
+	if !removeOK {
+		return false, message
+	}
+	return true, message
+}
+
+func findAcmeScript() string {
+	candidates := []string{"/root/.acme.sh/acme.sh"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && home != "/root" {
+		candidates = append(candidates, filepath.Join(home, ".acme.sh", "acme.sh"))
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func acmeRecordExists(domain string) bool {
+	for _, dir := range acmeRecordDirs(domain) {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func acmeEccRecordExists(domain string) bool {
+	for _, root := range acmeRoots() {
+		if info, err := os.Stat(filepath.Join(root, domain+"_ecc")); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func acmeRecordDirs(domain string) []string {
+	dirs := make([]string, 0)
+	for _, root := range acmeRoots() {
+		dirs = append(dirs, filepath.Join(root, domain), filepath.Join(root, domain+"_ecc"))
+	}
+	return dirs
+}
+
+func acmeRoots() []string {
+	roots := []string{"/root/.acme.sh"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && home != "/root" {
+		roots = append(roots, filepath.Join(home, ".acme.sh"))
+	}
+	return roots
+}
+
+func acmeListContains(script string, domain string) bool {
+	domains := listedAcmeDomains(script)
+	return domains != nil && domains[domain]
+}
+
+func listedAcmeDomains(script string) map[string]bool {
+	if script == "" {
+		return nil
+	}
+	cmd := acmeCommand(script, "--list")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+	domains := make(map[string]bool)
+	for _, line := range strings.Split(out.String(), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] != "Main_Domain" {
+			domains[fields[0]] = true
+		}
+	}
+	return domains
+}
+
+func acmeCommand(script string, args ...string) *exec.Cmd {
+	cmd := exec.Command(script, args...)
+	cmd.Env = append(os.Environ(), "HOME=/root")
+	return cmd
+}
+
+func compactStrings(values []string) []string {
+	compacted := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			compacted = append(compacted, value)
+		}
+	}
+	return compacted
 }
 
 func sanitizeCertDomain(domain string) string {

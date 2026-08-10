@@ -34,7 +34,7 @@
             <a-select allow-clear style="width: 260px"
                       :loading="certificateStore.loading"
                       placeholder="选择证书"
-                      @dropdown-visible-change="open => open && certificateStore.load()"
+                      @dropdown-visible-change="open => open && certificateStore.load(true)"
                       @change="selectTlsCertificate">
                 <a-select-option v-for="cert in certificateStore.validCertificates"
                                  :key="certificateStore.getValue(cert)"

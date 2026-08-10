@@ -303,6 +303,11 @@ const certificateStore = {
         this.certificates.splice(0, this.certificates.length, ...(msg.obj || []));
         this.loaded = true;
     },
+    async deleteCertificate(domain) {
+        const msg = await HttpUtil.post('/xui/certificates/delete', { domain });
+        await this.load(true);
+        return msg;
+    },
     get validCertificates() {
         return this.certificates.filter(cert => cert.valid);
     },

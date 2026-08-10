@@ -23,6 +23,7 @@ func (a *CertificateController) initRouter(g *gin.RouterGroup) {
 	g.POST("/discover", a.discover)
 	g.POST("/import", a.importCertificate)
 	g.POST("/validate", a.validate)
+	g.POST("/delete", a.deleteCertificate)
 }
 
 func (a *CertificateController) list(c *gin.Context) {
@@ -53,4 +54,14 @@ func (a *CertificateController) validate(c *gin.Context) {
 	}
 	cert, err := a.certificateService.Validate(form.CertFile, form.KeyFile)
 	jsonMsgObj(c, "验证证书", cert, err)
+}
+
+func (a *CertificateController) deleteCertificate(c *gin.Context) {
+	form := &entity.CertificateDeleteForm{}
+	if err := c.ShouldBind(form); err != nil {
+		jsonMsg(c, "删除证书", err)
+		return
+	}
+	result, err := a.certificateService.DeleteManaged(form.Domain)
+	jsonMsgObj(c, "删除证书", result, err)
 }

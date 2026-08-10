@@ -45,7 +45,7 @@
                                     <a-select allow-clear style="width: 320px"
                                               :loading="certificateStore.loading"
                                               placeholder="选择证书"
-                                              @dropdownVisibleChange="open => open && certificateStore.load()"
+                                              @dropdownVisibleChange="open => open && certificateStore.load(true)"
                                               @change="selectPanelCertificate">
                                         <a-select-option v-for="cert in certificateStore.validCertificates"
                                                          :key="certificateStore.getValue(cert)"
@@ -132,6 +132,7 @@
                 this.loading(false);
                 if (msg.success) {
                     await this.getAllSetting();
+                    await certificateStore.load(true);
                 }
             },
             async updateUser() {
@@ -172,7 +173,7 @@
         },
         async mounted() {
             await this.getAllSetting();
-            certificateStore.load();
+            certificateStore.load(true);
             while (true) {
                 await PromiseUtil.sleep(1000);
                 this.saveBtnDisable = this.oldAllSetting.equals(this.allSetting);
