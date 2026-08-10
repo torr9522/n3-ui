@@ -563,6 +563,119 @@ sql_escape() {
     echo "$1" | sed "s/'/''/g"
 }
 
+require_sqlite() {
+    if ! command -v sqlite3 &>/dev/null; then
+        LOGE "未找到 sqlite3，无法读取或写入面板设置"
+        return 1
+    fi
+    if [[ ! -f "${XUI_DB_PATH}" ]]; then
+        LOGE "未找到面板数据库: ${XUI_DB_PATH}"
+        return 1
+    fi
+    return 0
+}
+
+get_panel_setting() {
+    local key="$1"
+    sqlite3 "${XUI_DB_PATH}" "SELECT value FROM settings WHERE key='${key}' ORDER BY id DESC LIMIT 1;"
+}
+
+cert_key_match() {
+    local cert_file="$1"
+    local key_file="$2"
+    if ! command -v openssl &>/dev/null; then
+        LOGE "未找到 openssl，无法验证证书和私钥是否匹配"
+        return 1
+    fi
+    local cert_pub key_pub
+    cert_pub=$(mktemp)
+    key_pub=$(mktemp)
+    openssl x509 -noout -pubkey -in "${cert_file}" > "${cert_pub}" 2>/dev/null
+    local cert_ok=$?
+    openssl pkey -in "${key_file}" -pubout > "${key_pub}" 2>/dev/null
+    local key_ok=$?
+    if [[ ${cert_ok} -ne 0 || ${key_ok} -ne 0 ]]; then
+        rm -f "${cert_pub}" "${key_pub}"
+        return 1
+    fi
+    cmp -s "${cert_pub}" "${key_pub}"
+    local match=$?
+    rm -f "${cert_pub}" "${key_pub}"
+    return ${match}
+}
+
+show_panel_https_status() {
+    require_sqlite || return 1
+
+    local cert_file key_file
+    cert_file=$(get_panel_setting "webCertFile")
+    key_file=$(get_panel_setting "webKeyFile")
+
+    echo "----------------------------------------"
+    LOGI "面板 HTTPS 状态"
+    if [[ -z "${cert_file}" && -z "${key_file}" ]]; then
+        LOGI "是否启用HTTPS: 否"
+        return 0
+    fi
+    if [[ -n "${cert_file}" && -n "${key_file}" ]]; then
+        LOGI "是否启用HTTPS: 是"
+    else
+        LOGE "是否启用HTTPS: 配置不完整"
+    fi
+
+    LOGI "证书路径: ${cert_file:-未设置}"
+    if [[ -n "${cert_file}" && -f "${cert_file}" ]]; then
+        LOGI "证书文件: 存在"
+    else
+        LOGE "证书文件: 不存在"
+    fi
+
+    LOGI "私钥路径: ${key_file:-未设置}"
+    if [[ -n "${key_file}" && -f "${key_file}" ]]; then
+        LOGI "私钥文件: 存在"
+    else
+        LOGE "私钥文件: 不存在"
+    fi
+
+    if [[ -n "${cert_file}" && -f "${cert_file}" ]] && command -v openssl &>/dev/null; then
+        echo "----------------------------------------"
+        LOGI "openssl 证书信息:"
+        openssl x509 -noout -subject -issuer -dates -in "${cert_file}" 2>/dev/null
+        local expire
+        expire=$(openssl x509 -enddate -noout -in "${cert_file}" 2>/dev/null | cut -d= -f2)
+        if [[ -n "${expire}" ]]; then
+            LOGI "过期时间: ${expire}"
+        fi
+    elif ! command -v openssl &>/dev/null; then
+        LOGE "未找到 openssl，无法显示证书详情"
+    fi
+
+    if [[ -n "${cert_file}" && -f "${cert_file}" && -n "${key_file}" && -f "${key_file}" ]]; then
+        if cert_key_match "${cert_file}" "${key_file}"; then
+            LOGI "证书和私钥: 匹配"
+        else
+            LOGE "证书和私钥: 不匹配或无法解析"
+        fi
+    fi
+}
+
+disable_panel_https() {
+    require_sqlite || return 1
+
+    confirm "确认关闭面板 HTTPS 吗？不会删除任何证书文件" "n"
+    if [[ $? -ne 0 ]]; then
+        return 0
+    fi
+
+    sqlite3 "${XUI_DB_PATH}" "DELETE FROM settings WHERE key IN ('webCertFile','webKeyFile'); INSERT INTO settings (key,value) VALUES ('webCertFile',''); INSERT INTO settings (key,value) VALUES ('webKeyFile','');"
+    if [[ $? -ne 0 ]]; then
+        LOGE "关闭面板 HTTPS 失败"
+        return 1
+    fi
+    LOGI "面板 HTTPS 已关闭，证书文件未删除"
+    LOGI "请执行 systemctl restart x-ui 后使用 HTTP 访问面板"
+}
+
 save_panel_cert_setting() {
     local cert_file="$1"
     local key_file="$2"
@@ -570,10 +683,11 @@ save_panel_cert_setting() {
         LOGE "证书或私钥文件不存在"
         return 1
     fi
-    if ! command -v sqlite3 &>/dev/null; then
-        LOGE "未找到 sqlite3，无法写入面板设置"
+    if ! cert_key_match "${cert_file}" "${key_file}"; then
+        LOGE "证书和私钥不匹配或无法解析"
         return 1
     fi
+    require_sqlite || return 1
     local cert_sql key_sql
     cert_sql=$(sql_escape "${cert_file}")
     key_sql=$(sql_escape "${key_file}")
@@ -599,6 +713,64 @@ set_panel_https_certificate() {
     save_panel_cert_setting "${dir}/fullchain.pem" "${dir}/privkey.pem"
 }
 
+repair_panel_https_certificate() {
+    if [[ ! -d "${XUI_CERT_DIR}" ]]; then
+        LOGE "证书目录不存在: ${XUI_CERT_DIR}"
+        return 1
+    fi
+
+    LOGI "可用证书:"
+    local found=0
+    for dir in "${XUI_CERT_DIR}"/*; do
+        [[ -d "${dir}" ]] || continue
+        local cert_file="${dir}/fullchain.pem"
+        local key_file="${dir}/privkey.pem"
+        [[ -f "${cert_file}" && -f "${key_file}" ]] || continue
+        found=1
+        local domain
+        domain=$(basename "${dir}")
+        if [[ -f "${dir}/meta.json" ]] && command -v jq &>/dev/null; then
+            local meta_domain
+            meta_domain=$(jq -r '.domain // empty' "${dir}/meta.json")
+            if [[ -n "${meta_domain}" ]]; then
+                domain="${meta_domain}"
+            fi
+        fi
+        echo "----------------------------------------"
+        LOGI "域名: ${domain}"
+        LOGI "证书: ${cert_file}"
+        LOGI "私钥: ${key_file}"
+        if command -v openssl &>/dev/null; then
+            openssl x509 -enddate -noout -in "${cert_file}" 2>/dev/null
+        fi
+    done
+    if [[ ${found} -eq 0 ]]; then
+        LOGE "未找到可用证书"
+        return 1
+    fi
+
+    local domain=""
+    read -p "请输入要修复/设置为面板 HTTPS 的域名:" domain
+    if [[ -z "${domain}" ]]; then
+        LOGE "域名不能为空"
+        return 1
+    fi
+    local dir cert_file key_file
+    dir=$(cert_domain_dir "${domain}")
+    cert_file="${dir}/fullchain.pem"
+    key_file="${dir}/privkey.pem"
+    if [[ ! -f "${cert_file}" || ! -f "${key_file}" ]]; then
+        LOGE "证书或私钥文件不存在: ${dir}"
+        return 1
+    fi
+    if ! cert_key_match "${cert_file}" "${key_file}"; then
+        LOGE "证书和私钥不匹配或无法解析"
+        return 1
+    fi
+    LOGI "证书和私钥验证通过"
+    save_panel_cert_setting "${cert_file}" "${key_file}"
+}
+
 cert_manage() {
     echo -e "
   ${green}证书管理${plain}
@@ -608,8 +780,11 @@ cert_manage() {
   ${green}3.${plain} 续期证书
   ${green}4.${plain} 删除证书
   ${green}5.${plain} 设置面板HTTPS证书
+  ${green}6.${plain} 查看当前面板HTTPS状态
+  ${green}7.${plain} 关闭面板HTTPS
+  ${green}8.${plain} 修复/重新设置面板HTTPS
  "
-    echo && read -p "请输入选择 [0-5]: " num
+    echo && read -p "请输入选择 [0-8]: " num
     case "${num}" in
     0)
         show_menu
@@ -629,8 +804,17 @@ cert_manage() {
     5)
         set_panel_https_certificate
         ;;
+    6)
+        show_panel_https_status
+        ;;
+    7)
+        disable_panel_https
+        ;;
+    8)
+        repair_panel_https_certificate
+        ;;
     *)
-        LOGE "请输入正确的数字 [0-5]"
+        LOGE "请输入正确的数字 [0-8]"
         ;;
     esac
 }
