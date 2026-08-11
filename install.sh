@@ -641,10 +641,22 @@ install_x-ui() {
     fi
     install_access_logrotate
 
+    local display_version=""
+    local display_name="n3-ui"
+    if [[ -f /usr/local/x-ui/config/version ]]; then
+        display_version="$(tr -d '[:space:]' < /usr/local/x-ui/config/version)"
+    fi
+    if [[ -n "${display_version}" ]]; then
+        display_version="${display_version#v}"
+        display_name="n3-ui v${display_version}"
+    elif [[ -n "${last_version}" ]]; then
+        display_name="n3-ui ${last_version}"
+    fi
+
     # ── 安装完成，展示面板信息 ─────────────────────────────────────────────────
     echo -e ""
     echo -e "${green}================================================================${plain}"
-    echo -e "${green}  x-ui v${last_version} 安装完成，面板已启动！${plain}"
+    echo -e "${green}  ${display_name} 安装完成，面板已启动！${plain}"
     echo -e "${green}================================================================${plain}"
     echo -e ""
     echo -e "  ${yellow}面板登录信息${plain}"
