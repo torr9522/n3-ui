@@ -51,6 +51,55 @@ is_numeric() {
     [[ "${1:-}" =~ ^[0-9]+$ ]]
 }
 
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+install_missing_apt_packages() {
+    local packages=("$@")
+    local missing=()
+    local pkg
+
+    for pkg in "${packages[@]}"; do
+        case "${pkg}" in
+            curl|wget|openssl)
+                if ! command_exists "${pkg}"; then
+                    missing+=("${pkg}")
+                fi
+                ;;
+            ca-certificates|unzip|socat)
+                if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+                    missing+=("${pkg}")
+                fi
+                ;;
+            sqlite3)
+                if ! command_exists sqlite3; then
+                    missing+=("${pkg}")
+                fi
+                ;;
+            nftables)
+                if ! command_exists nft; then
+                    missing+=("${pkg}")
+                fi
+                ;;
+            *)
+                if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+                    missing+=("${pkg}")
+                fi
+                ;;
+        esac
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo -e "${green}基础依赖已满足。${plain}"
+        return 0
+    fi
+
+    echo -e "${yellow}安装缺失依赖: ${missing[*]}${plain}"
+    apt-get update || error_exit "apt-get update 失败。"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" || error_exit "基础依赖安装失败。"
+}
+
 require_systemctl() {
     command -v systemctl >/dev/null 2>&1 || error_exit "当前环境未检测到 systemctl，无法管理 x-ui 服务。"
 }
@@ -235,8 +284,7 @@ install_base() {
     if [[ x"${release}" == x"centos" ]]; then
         yum install wget curl tar jq nftables sqlite python3 unzip logrotate git -y || error_exit "基础依赖安装失败。"
     else
-        apt-get update || error_exit "apt-get update 失败。"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y wget curl tar jq nftables sqlite3 python3 unzip logrotate git ca-certificates || error_exit "基础依赖安装失败。"
+        install_missing_apt_packages wget curl tar jq nftables sqlite3 python3 unzip logrotate git ca-certificates openssl socat
     fi
 }
 

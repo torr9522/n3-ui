@@ -36,6 +36,10 @@ function LOGI() {
     echo -e "${green}[INF] $* ${plain}"
 }
 
+is_valid_port() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && [[ "$1" -ge 1 && "$1" -le 65535 ]]
+}
+
 run_install_script() {
     local script_url="$1"
     shift
@@ -1062,16 +1066,20 @@ ssl_cert_issue_standalone() {
         fi
     fi
     #install socat second
-    if [[ x"${release}" == x"centos" ]]; then
-        yum install socat -y
+    if ! command -v socat &>/dev/null; then
+        if [[ x"${release}" == x"centos" ]]; then
+            yum install socat -y
+        else
+            apt install socat -y
+        fi
+        if [ $? -ne 0 ]; then
+            LOGE "无法安装socat,请检查错误日志"
+            exit 1
+        else
+            LOGI "socat安装成功..."
+        fi
     else
-        apt install socat -y
-    fi
-    if [ $? -ne 0 ]; then
-        LOGE "无法安装socat,请检查错误日志"
-        exit 1
-    else
-        LOGI "socat安装成功..."
+        LOGI "socat已安装..."
     fi
     #get the domain here,and we need verify it
     local domain=""
@@ -1088,10 +1096,20 @@ ssl_cert_issue_standalone() {
     fi
     #get needed port here
     local WebPort=80
-    read -p "请输入你所希望使用的端口,如回车将使用默认80端口:" WebPort
-    if [[ ${WebPort} -gt 65535 || ${WebPort} -lt 1 ]]; then
-        LOGE "你所选择的端口${WebPort}为无效值,将使用默认80端口进行申请"
-    fi
+    local input_port=""
+    while true; do
+        read -p "请输入HTTP验证端口,直接回车使用默认80端口:" input_port
+        if [[ -z "${input_port}" ]]; then
+            WebPort=80
+            LOGI "未输入端口，使用默认80"
+            break
+        fi
+        if is_valid_port "${input_port}"; then
+            WebPort="${input_port}"
+            break
+        fi
+        LOGE "端口无效，请输入1-65535之间的数字"
+    done
     LOGI "将会使用${WebPort}进行证书申请,请确保端口处于开放状态..."
     #NOTE:This should be handled by use
     #open the port and kill the occupied progress
