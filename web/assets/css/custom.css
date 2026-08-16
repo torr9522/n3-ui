@@ -10,6 +10,67 @@
     display: none;
 }
 
+.n3-light-sidebar,
+.n3-light-sidebar .ant-layout-sider-children {
+    background-color: #fff;
+}
+
+.n3-light-sidebar-menu.ant-menu-light,
+.n3-light-sidebar-menu.ant-menu-inline {
+    background-color: #fff;
+    color: rgba(0, 0, 0, 0.85);
+}
+
+.n3-light-sidebar-menu .ant-menu-item,
+.n3-light-sidebar-menu .ant-menu-submenu-title {
+    color: rgba(0, 0, 0, 0.85);
+}
+
+.n3-light-sidebar-menu .ant-menu-item .anticon,
+.n3-light-sidebar-menu .ant-menu-submenu-title .anticon {
+    color: rgba(0, 0, 0, 0.65);
+}
+
+.n3-light-sidebar-menu .ant-menu-item:hover,
+.n3-light-sidebar-menu .ant-menu-submenu-title:hover {
+    color: #1890ff;
+    background-color: #e6f7ff;
+}
+
+.n3-light-sidebar-menu .ant-menu-item:hover .anticon,
+.n3-light-sidebar-menu .ant-menu-submenu-title:hover .anticon {
+    color: #1890ff;
+}
+
+#sider .n3-light-sidebar-menu.ant-menu-light .ant-menu-item-selected,
+#sider-drawer .n3-light-sidebar-menu.ant-menu-light .ant-menu-item-selected {
+    color: #fff;
+    background-color: #1890ff;
+}
+
+#sider .n3-light-sidebar-menu.ant-menu-light .ant-menu-item-selected .anticon,
+#sider-drawer .n3-light-sidebar-menu.ant-menu-light .ant-menu-item-selected .anticon {
+    color: #fff;
+}
+
+.n3-light-sidebar-menu .ant-menu-submenu-selected > .ant-menu-submenu-title {
+    color: #1890ff;
+}
+
+.n3-light-sidebar-menu .ant-menu-submenu-selected > .ant-menu-submenu-title .anticon {
+    color: #1890ff;
+}
+
+.n3-light-sidebar-menu .ant-menu-sub {
+    background-color: #fff;
+}
+
+.n3-light-sidebar-drawer,
+.n3-light-sidebar-drawer .ant-drawer-content,
+.n3-light-sidebar-drawer .ant-drawer-body {
+    background-color: #fff;
+}
+
 .ant-card {
     border-radius: 30px;
 }

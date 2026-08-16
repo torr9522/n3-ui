@@ -41,19 +41,19 @@
 
 
 {{define "commonSider"}}
-<a-layout-sider id="sider" collapsible breakpoint="md" collapsed-width="0">
-    <a-menu theme="dark" mode="inline" :selected-keys="['{{ .request_uri }}']"
+<a-layout-sider id="sider" class="n3-light-sidebar" theme="light" collapsible breakpoint="md" collapsed-width="0">
+    <a-menu class="n3-light-sidebar-menu" theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
     </a-menu>
 </a-layout-sider>
-<a-drawer id="sider-drawer" placement="left" :closable="false"
+<a-drawer id="sider-drawer" class="n3-light-sidebar-drawer" placement="left" :closable="false"
           @close="siderDrawer.close()"
           :visible="siderDrawer.visible" :wrap-style="{ padding: 0 }">
     <div class="drawer-handle" @click="siderDrawer.change()" slot="handle">
         <a-icon :type="siderDrawer.visible ? 'close' : 'menu-fold'"></a-icon>
     </div>
-    <a-menu theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
+    <a-menu class="n3-light-sidebar-menu" theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
         @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
     </a-menu>
