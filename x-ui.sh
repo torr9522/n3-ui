@@ -1045,18 +1045,26 @@ ssl_cert_issue() {
 install_acme() {
     cd ~
     LOGI "开始安装acme脚本..."
-    curl -Ls "${XUI_ACME_INSTALL_URL}" | sh
-    if [ $? -ne 0 ]; then
+    if ! curl -fLsS "${XUI_ACME_INSTALL_URL}" | sh; then
         LOGE "acme安装失败"
         return 1
-    else
-        LOGI "acme安装成功"
     fi
+    if [[ ! -x "${HOME}/.acme.sh/acme.sh" ]]; then
+        LOGE "acme安装失败: ${HOME}/.acme.sh/acme.sh 不存在或不可执行"
+        return 1
+    fi
+    LOGI "acme安装成功"
     return 0
 }
 
 #method for standalone mode
 ssl_cert_issue_standalone() {
+    if ! command -v crontab >/dev/null 2>&1; then
+        LOGE "未检测到 crontab。"
+        LOGE "普通证书申请和自动续期需要 cron。"
+        LOGE "请先安装 cron 后重新申请证书。"
+        exit 1
+    fi
     #check for acme.sh first
     if ! command -v ~/.acme.sh/acme.sh &>/dev/null; then
         install_acme

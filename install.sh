@@ -284,7 +284,7 @@ install_base() {
     if [[ x"${release}" == x"centos" ]]; then
         yum install wget curl tar jq nftables sqlite python3 unzip logrotate git -y || error_exit "基础依赖安装失败。"
     else
-        install_missing_apt_packages wget curl tar jq nftables sqlite3 python3 unzip logrotate git ca-certificates openssl socat
+        install_missing_apt_packages wget curl tar jq nftables sqlite3 python3 unzip logrotate git ca-certificates openssl socat cron
     fi
 }
 

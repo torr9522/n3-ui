@@ -50,5 +50,5 @@ if ! $_get "$_url" | sh -s -- --install-online $_email "$@"; then
   echo "Install error"
   echo "中国大陆用户请参考:"
   echo "https://github.com/acmesh-official/acme.sh/wiki/Install-in-China"
+  exit 1
 fi
-

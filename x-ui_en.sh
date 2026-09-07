@@ -469,18 +469,26 @@ ssl_cert_issue() {
 install_acme() {
     cd ~
     LOGI "install acme..."
-    curl -Ls "${XUI_ACME_INSTALL_URL}" | sh
-    if [ $? -ne 0 ]; then
+    if ! curl -fLsS "${XUI_ACME_INSTALL_URL}" | sh; then
         LOGE "install acme failed"
         return 1
-    else
-        LOGI "install acme succeed"
     fi
+    if [[ ! -x "${HOME}/.acme.sh/acme.sh" ]]; then
+        LOGE "install acme failed: ${HOME}/.acme.sh/acme.sh does not exist or is not executable"
+        return 1
+    fi
+    LOGI "install acme succeed"
     return 0
 }
 
 #method for standalone mode
 ssl_cert_issue_standalone() {
+    if ! command -v crontab >/dev/null 2>&1; then
+        LOGE "crontab was not found."
+        LOGE "Ordinary certificate issuance and automatic renewal require cron."
+        LOGE "Install cron before requesting the certificate again."
+        exit 1
+    fi
     #check for acme.sh first
     if ! command -v ~/.acme.sh/acme.sh &>/dev/null; then
         echo "acme.sh could not be found. we will install it"
