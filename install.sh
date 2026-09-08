@@ -12,10 +12,9 @@ XUI_REPO_URL="${XUI_REPO_URL:-https://github.com/torr9522/n3-ui.git}"
 XUI_REPO_BRANCH="${XUI_REPO_BRANCH:-main}"
 INSTALL_MODE="${INSTALL_MODE:-prebuilt}"
 XUI_RELEASES_BASE="${XUI_RELEASES_BASE:-${XUI_RELEASES_RAW_BASE:-https://github.com/torr9522/n3-ui/releases/download/n3-ui-assets}}"
-XUI_PREBUILT_VERSION="${XUI_PREBUILT_VERSION:-0.4.2}"
-XUI_PREBUILT_COMMIT="${XUI_PREBUILT_COMMIT:-e82f2525f6f149575ede27548266ea01847b5749}"
-XUI_PREBUILT_RELEASE_TAG="${XUI_PREBUILT_RELEASE_TAG:-n3-ui-prebuilt-v${XUI_PREBUILT_VERSION}-${XUI_PREBUILT_COMMIT:0:12}}"
-XUI_PREBUILT_RELEASES_BASE="${XUI_PREBUILT_RELEASES_BASE:-https://github.com/torr9522/n3-ui/releases/download/${XUI_PREBUILT_RELEASE_TAG}}"
+XUI_PREBUILT_VERSION="0.4.3"
+XUI_PREBUILT_TAG="n3-ui-prebuilt-v0.4.3"
+XUI_PREBUILT_RELEASES_BASE="${XUI_PREBUILT_RELEASES_BASE:-https://github.com/torr9522/n3-ui/releases/download/${XUI_PREBUILT_TAG}}"
 
 resolve_install_script_dir() {
     local script_source="${BASH_SOURCE[0]:-$0}"
@@ -218,7 +217,6 @@ install_prebuilt_n3_ui() {
         return 1
     fi
     if [[ "$(awk -F= '$1=="version"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "${XUI_PREBUILT_VERSION}" ]] \
-        || [[ "$(awk -F= '$1=="commit"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "${XUI_PREBUILT_COMMIT}" ]] \
         || [[ "$(awk -F= '$1=="goos"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "linux" ]] \
         || [[ "$(awk -F= '$1=="goarch"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "amd64" ]] \
         || [[ "$(awk -F= '$1=="cgo_enabled"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "1" ]]; then
