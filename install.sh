@@ -10,8 +10,12 @@ INSTALL_SCRIPT_DIR=""
 XUI_RAW_BASE="${XUI_RAW_BASE:-https://raw.githubusercontent.com/torr9522/n3-ui/main}"
 XUI_REPO_URL="${XUI_REPO_URL:-https://github.com/torr9522/n3-ui.git}"
 XUI_REPO_BRANCH="${XUI_REPO_BRANCH:-main}"
-INSTALL_MODE="${INSTALL_MODE:-source}"
+INSTALL_MODE="${INSTALL_MODE:-prebuilt}"
 XUI_RELEASES_BASE="${XUI_RELEASES_BASE:-${XUI_RELEASES_RAW_BASE:-https://github.com/torr9522/n3-ui/releases/download/n3-ui-assets}}"
+XUI_PREBUILT_VERSION="${XUI_PREBUILT_VERSION:-0.4.2}"
+XUI_PREBUILT_COMMIT="${XUI_PREBUILT_COMMIT:-8bc9bdc3ef989c17634f1d525d0bf8bf71587336}"
+XUI_PREBUILT_RELEASE_TAG="${XUI_PREBUILT_RELEASE_TAG:-n3-ui-prebuilt-v${XUI_PREBUILT_VERSION}-${XUI_PREBUILT_COMMIT:0:12}}"
+XUI_PREBUILT_RELEASES_BASE="${XUI_PREBUILT_RELEASES_BASE:-https://github.com/torr9522/n3-ui/releases/download/${XUI_PREBUILT_RELEASE_TAG}}"
 
 resolve_install_script_dir() {
     local script_source="${BASH_SOURCE[0]:-$0}"
@@ -130,6 +134,123 @@ copy_or_download() {
     else
         download_file "${target_path}" "${remote_url}"
     fi
+}
+
+verify_prebuilt_archive() {
+    local archive="$1"
+    local member
+    local -a expected_members=(
+        'x-ui/'
+        'x-ui/BUILD-INFO'
+        'x-ui/bin/'
+        'x-ui/bin/config.json'
+        'x-ui/config/'
+        'x-ui/config/version'
+        'x-ui/install.sh'
+        'x-ui/x-ui'
+        'x-ui/x-ui.service'
+        'x-ui/x-ui.sh'
+    )
+    local archive_members
+
+    archive_members="$(tar -tzf "${archive}")" || return 1
+    [[ "$(printf '%s\n' "${archive_members}" | sed '/^$/d' | wc -l)" -eq "${#expected_members[@]}" ]] || return 1
+    for member in "${expected_members[@]}"; do
+        printf '%s\n' "${archive_members}" | grep -Fxq -- "${member}" || return 1
+    done
+    if tar -tvzf "${archive}" | awk '$1 !~ /^d/ && $1 !~ /^-/ { exit 1 }'; then
+        return 0
+    fi
+    return 1
+}
+
+install_prebuilt_n3_ui() {
+    local package_arch="$1"
+    local package_file checksum_file expected actual staging previous_install
+    local package_url checksum_url
+
+    [[ "${package_arch}" == "amd64" ]] || return 2
+    package_url="${XUI_PACKAGE_URL:-${XUI_PREBUILT_RELEASES_BASE}/n3-ui-v${XUI_PREBUILT_VERSION}-linux-${package_arch}.tar.gz}"
+    checksum_url="${XUI_PACKAGE_SHA256_URL:-${package_url}.sha256}"
+    package_file="$(mktemp /tmp/n3-ui-prebuilt.XXXXXX.tar.gz)" || return 1
+    checksum_file="$(mktemp /tmp/n3-ui-prebuilt.XXXXXX.sha256)" || {
+        rm -f "${package_file}"
+        return 1
+    }
+
+    echo -e "${green}[INF] 正在尝试安装 n3-ui 预编译 amd64 包...${plain}"
+    if ! curl -fL --retry 2 --retry-all-errors --connect-timeout 10 --max-time 300 -o "${package_file}" "${package_url}"; then
+        echo -e "${yellow}[WARN] 预编译包下载失败：${package_url}${plain}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    if [[ ! -s "${package_file}" ]]; then
+        echo -e "${yellow}[WARN] 预编译包为空。${plain}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    if ! curl -fL --retry 2 --retry-all-errors --connect-timeout 10 --max-time 300 -o "${checksum_file}" "${checksum_url}"; then
+        echo -e "${yellow}[WARN] 预编译包 SHA256 文件下载失败：${checksum_url}${plain}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    expected="$(grep -Eo '[[:xdigit:]]{64}' "${checksum_file}" | head -n 1 | tr '[:upper:]' '[:lower:]')"
+    actual="$(sha256sum "${package_file}" | awk '{print tolower($1)}')"
+    if [[ -z "${expected}" || "${actual}" != "${expected}" ]]; then
+        echo -e "${yellow}[WARN] 预编译包 SHA256 校验失败。${plain}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    if ! verify_prebuilt_archive "${package_file}"; then
+        echo -e "${yellow}[WARN] 预编译包 tar 完整性、成员类型或必需文件校验失败。${plain}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+
+    staging="$(mktemp -d /usr/local/.n3-ui-prebuilt-stage.XXXXXX)" || {
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    }
+    if ! tar -xzf "${package_file}" -C "${staging}" || [[ ! -d "${staging}/x-ui" ]]; then
+        echo -e "${yellow}[WARN] 预编译包解压失败。${plain}"
+        rm -rf "${staging}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    if [[ "$(awk -F= '$1=="version"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "${XUI_PREBUILT_VERSION}" ]] \
+        || [[ "$(awk -F= '$1=="commit"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "${XUI_PREBUILT_COMMIT}" ]] \
+        || [[ "$(awk -F= '$1=="goos"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "linux" ]] \
+        || [[ "$(awk -F= '$1=="goarch"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "amd64" ]] \
+        || [[ "$(awk -F= '$1=="cgo_enabled"{print $2}' "${staging}/x-ui/BUILD-INFO")" != "1" ]]; then
+        echo -e "${yellow}[WARN] 预编译包构建元数据与安装器要求不一致。${plain}"
+        rm -rf "${staging}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    if ! chmod +x "${staging}/x-ui/x-ui" "${staging}/x-ui/x-ui.sh" "${staging}/x-ui/install.sh"; then
+        echo -e "${yellow}[WARN] 无法设置预编译包文件权限。${plain}"
+        rm -rf "${staging}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    previous_install="${staging}.previous"
+    if [[ -e /usr/local/x-ui ]] && ! mv /usr/local/x-ui "${previous_install}"; then
+        echo -e "${yellow}[WARN] 无法暂存现有 n3-ui 安装目录。${plain}"
+        rm -rf "${staging}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    if ! mv "${staging}/x-ui" /usr/local/x-ui; then
+        echo -e "${yellow}[WARN] 预编译包部署失败。${plain}"
+        [[ -e "${previous_install}" ]] && mv "${previous_install}" /usr/local/x-ui
+        rm -rf "${staging}"
+        rm -f "${package_file}" "${checksum_file}"
+        return 1
+    fi
+    rm -rf "${previous_install}" "${staging}"
+    rm -f "${package_file}" "${checksum_file}"
+    echo -e "${green}[INF] n3-ui 预编译包校验通过，使用预编译版本安装。${plain}"
+    return 0
 }
 
 find_local_source_dir() {
@@ -591,17 +712,30 @@ install_x-ui() {
     local package_file
     local url
     local local_source_dir=""
+    local prebuilt_used=0
+    local existing_config=0
     if [[ $# -eq 0 || -z "${1:-}" ]]; then
         last_version="n3-ui-source"
     else
         last_version="$1"
     fi
+    [[ -f /etc/x-ui/x-ui.db ]] && existing_config=1
     local_source_dir="$(find_local_source_dir || true)"
-    if [[ -e /usr/local/x-ui/ ]]; then
+    if [[ -z "${local_source_dir}" && "${INSTALL_MODE}" == "prebuilt" && "${package_arch}" == "amd64" ]]; then
+        if install_prebuilt_n3_ui "${package_arch}"; then
+            prebuilt_used=1
+        else
+            echo -e "${yellow}[WARN] 预编译包不可用，回退到源码编译安装。${plain}"
+        fi
+    fi
+
+    if [[ "${prebuilt_used}" -eq 0 && -e /usr/local/x-ui/ ]]; then
         rm -rf /usr/local/x-ui/
     fi
 
-    if [[ -n "${local_source_dir}" ]]; then
+    if [[ "${prebuilt_used}" -eq 1 ]]; then
+        cd /usr/local/ || error_exit "无法进入 /usr/local 目录。"
+    elif [[ -n "${local_source_dir}" ]]; then
         echo -e "install source: local source ${local_source_dir}"
         if ! cp -a "${local_source_dir}" /usr/local/x-ui; then
             error_exit "复制本地源码到 /usr/local/x-ui 失败。"
@@ -614,7 +748,7 @@ install_x-ui() {
             error_exit "本地源码编译 x-ui 失败。"
         fi
         cd /usr/local/ || error_exit "无法进入 /usr/local 目录。"
-    elif [[ "${INSTALL_MODE}" == "source" ]]; then
+    elif [[ "${INSTALL_MODE}" == "source" || "${INSTALL_MODE}" == "prebuilt" ]]; then
         local build_root
         local source_dir
         build_root="$(mktemp -d /tmp/n3-ui-build.XXXXXX)"
@@ -668,6 +802,11 @@ install_x-ui() {
     chmod +x bin/xray-linux-* 2>/dev/null || true
     sync_default_xray_assets || error_exit "同步默认 xray 版本失败。"
     cp -f x-ui.service /etc/systemd/system/ || error_exit "安装 x-ui.service 失败。"
+    if [[ ! -f /usr/local/x-ui/install.sh ]]; then
+        if ! copy_or_download "${INSTALL_SCRIPT_DIR}/install.sh" "" "/usr/local/x-ui/install.sh" "${XUI_RAW_BASE}/install.sh"; then
+            error_exit "安装 n3-ui 安装脚本失败。"
+        fi
+    fi
     if ! copy_or_download "${INSTALL_SCRIPT_DIR}/x-ui.sh" "/usr/local/x-ui/x-ui.sh" "/usr/bin/x-ui" "${XUI_RAW_BASE}/x-ui.sh"; then
         error_exit "下载 x-ui 管理脚本失败。"
     fi
@@ -675,8 +814,12 @@ install_x-ui() {
     chmod +x /usr/bin/x-ui || error_exit "设置 /usr/bin/x-ui 可执行权限失败。"
     ensure_xui_binary_compatible || error_exit "x-ui 二进制兼容性修复失败。"
 
-    # ── 自动配置随机账号 ───────────────────────────────────────────────────────
-    config_after_install
+    # ── 仅首次安装生成随机配置；升级保留现有数据库、账号、端口和证书 ────────────
+    if [[ "${existing_config}" -eq 0 ]]; then
+        config_after_install
+    else
+        echo -e "${green}[INF] 检测到现有 /etc/x-ui/x-ui.db，保留面板配置。${plain}"
+    fi
 
     systemctl daemon-reload || error_exit "systemd 重新加载失败。"
     systemctl enable x-ui || error_exit "设置 x-ui 开机自启失败。"
@@ -707,16 +850,21 @@ install_x-ui() {
     echo -e "${green}  ${display_name} 安装完成，面板已启动！${plain}"
     echo -e "${green}================================================================${plain}"
     echo -e ""
-    echo -e "  ${yellow}面板登录信息${plain}"
-    echo -e "  ┌─────────────────────────────────────────────┐"
-    echo -e "  │  登录地址：${green}${AUTO_UI_URL}${plain}"
-    echo -e "  │  用 户 名：${green}${AUTO_USERNAME}${plain}"
-    echo -e "  │  密    码：${green}${AUTO_PASSWORD}${plain}"
-    echo -e "  │  端    口：${green}${AUTO_PORT}${plain}"
-    echo -e "  └─────────────────────────────────────────────┘"
-    echo -e ""
-    echo -e "  ${yellow}提示：${plain}如忘记登录信息，可输入 ${green}x-ui${plain} 并选择菜单选项查看"
-    echo -e ""
+    if [[ "${existing_config}" -eq 0 ]]; then
+        echo -e "  ${yellow}面板登录信息${plain}"
+        echo -e "  ┌─────────────────────────────────────────────┐"
+        echo -e "  │  登录地址：${green}${AUTO_UI_URL}${plain}"
+        echo -e "  │  用 户 名：${green}${AUTO_USERNAME}${plain}"
+        echo -e "  │  密    码：${green}${AUTO_PASSWORD}${plain}"
+        echo -e "  │  端    口：${green}${AUTO_PORT}${plain}"
+        echo -e "  └─────────────────────────────────────────────┘"
+        echo -e ""
+        echo -e "  ${yellow}提示：${plain}如忘记登录信息，可输入 ${green}x-ui${plain} 并选择菜单选项查看"
+        echo -e ""
+    else
+        echo -e "  ${yellow}现有数据库、账号、端口与证书配置已保留。${plain}"
+        echo -e ""
+    fi
     echo -e "${green}================================================================${plain}"
     echo -e "  x-ui 管理命令："
     echo -e "  ┌─────────────────────────────────────────────┐"
